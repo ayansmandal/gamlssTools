@@ -438,3 +438,245 @@ make_centile_fan <- function(gamlssModel, df, x_var,
   return(final_plot_obj)
   
 }
+
+# The following function is the same as make_centile_fan (as it was on 1/28/25) but instead of producing the centile lines of the phenotype it outputs the derivatives of those centile lines! 
+
+make_centile_fan_derivative <- function(gamlssModel, df, x_var, 
+                             color_var=NULL,
+                             get_peaks=TRUE,
+                             x_axis = c("custom",
+                                        "lifespan", "log_lifespan", 
+                                        "lifespan_fetal", "log_lifespan_fetal"),
+                             desiredCentiles = c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99),
+                             average_over = FALSE,
+                             sim_data_list = NULL,
+                             show_points = TRUE,
+                             label_centiles = TRUE,
+                             remove_cent_effect = NULL,
+                             remove_point_effect = NULL,
+                             color_manual = NULL,
+                             ...){
+  
+  library(pracma) # install this if it doesn't already exist!
+  
+  pheno <- as.character(gamlssModel$mu.terms[[2]])
+  
+
+  
+  #check that var names are input correctly
+  stopifnot(is.character(x_var))
+  
+  #simulate dataset(s) if not already supplied
+  if (is.null(sim_data_list)) {
+    sim_list <- sim_data(df, x_var, color_var, gamlssModel)
+  } else if (!is.null(sim_data_list)) {
+    sim_list <- sim_data_list
+  }
+  
+  #predict centiles - CHECK IF THIS WORKS FOR SPECIFYING OPTIONAL ARGS
+  pred_list <- centile_predict(gamlssModel = gamlssModel, 
+                               sim_df_list = sim_list, 
+                               x_var = x_var, 
+                               desiredCentiles = desiredCentiles,
+                               df = df,
+                               average_over = average_over,
+                               get_peaks=get_peaks,
+                               resid_terms = remove_cent_effect)
+  
+
+  # extract centiles and concatenate into single dataframe
+  select_centile_dfs <- grep("^fanCentiles_", names(pred_list), value = TRUE)
+  centile_dfs <- pred_list[select_centile_dfs]
+  names(centile_dfs) <- sub("fanCentiles_", "", names(centile_dfs)) #drop prefix
+  
+  # modify centiles_dfs to give the rate of growth instead of growth itself
+  
+  for (cent in desiredCentiles){
+    cent_name <- paste0("cent_",as.character(cent))
+    centile_dfs$df[cent_name] <- gradient(centile_dfs$df[[cent_name]], centile_dfs$df[[x_var]])
+  }
+  
+  
+  if (!is.null(color_var)){
+    #merge across levels of color_var
+    merged_centile_df <- bind_rows(centile_dfs, .id = color_var)
+  } else {
+    merged_centile_df <- centile_dfs[[1]]
+    
+    #change average_over to TRUE for to easily skip color selection
+    average_over <- TRUE
+  }
+  #now make long so centile lines connect
+  long_centile_df <- merged_centile_df %>%
+    tidyr::gather(id.vars, values, !any_of(c(color_var, x_var)))
+  
+  # subfunction to define thickness of each centile line, with the 50th being thickest
+  map_thickness <- function(x){
+    if (x == 0.5){
+      return(1.75)
+    } else if (x < 0.1 || x > 0.9){
+      return (0.25)
+    } else if (x < 0.25 || x > 0.75){
+      return (0.5)
+    } else {
+      return(1)
+    }
+  }
+  
+  centile_linewidth <- sapply(desiredCentiles, map_thickness)
+  
+  #convert color_var to factor as needed
+  if (!is.null(color_var) && is.numeric(df[[color_var]])){
+    df[[color_var]] <- as.factor(df[[color_var]])
+  }
+  
+  #remove effects from points if necessary
+  if (show_points == TRUE && !is.null(remove_point_effect)) {
+    message(paste("Residualizing", remove_point_effect, "from data points"))
+    point_df <- resid_data(gamlssModel, df=df, og_data=df, rm_terms=remove_point_effect)
+  } else if (show_points == TRUE && is.null(remove_point_effect)) {
+    point_df <- df
+  } else if (show_points == FALSE && !is.null(remove_point_effect)){
+    warning("Points not shown so no residual effects removed")
+  }
+  
+  #def base gg object (w/ or w/o points)
+  if (average_over == FALSE){
+    if (show_points == TRUE & is.null(color_manual)){
+      base_plot_obj <- ggplot() +
+        geom_point(aes(y = point_df[[pheno]], x = point_df[[x_var]], 
+                       color=point_df[[color_var]], 
+                       fill=point_df[[color_var]]), alpha=0.3)
+      
+    } else if (show_points == TRUE & !is.null(color_manual)){
+      base_plot_obj <- ggplot() +
+        geom_point(aes(y = point_df[[pheno]], x = point_df[[x_var]]), 
+                   color=color_manual, 
+                   fill=color_manual, alpha=0.3)
+    } else if (show_points==FALSE){
+      base_plot_obj <- ggplot()
+    }
+    
+    #now add centile fans
+    if (is.null(color_manual)){
+      base_plot_obj <- base_plot_obj +
+        geom_line(aes(x = long_centile_df[[x_var]], y = long_centile_df$values,
+                      group = interaction(long_centile_df$id.vars, long_centile_df[[color_var]]),
+                      color = long_centile_df[[color_var]],
+                      linewidth = long_centile_df$id.vars)) + 
+        scale_linewidth_manual(values = centile_linewidth, guide = "none")
+    } else {
+      base_plot_obj <- base_plot_obj +
+        geom_line(aes(x = long_centile_df[[x_var]], y = long_centile_df$values,
+                      group = interaction(long_centile_df$id.vars, long_centile_df[[color_var]]),
+                      linewidth = long_centile_df$id.vars),
+                  color=color_manual) + 
+        scale_linewidth_manual(values = centile_linewidth, guide = "none")
+    }
+    
+  } else if (average_over == TRUE){
+    print("plotting one centile fan...")
+    if (show_points == TRUE){
+      base_plot_obj <- ggplot() +
+        geom_point(aes(y = point_df[[pheno]], x = point_df[[x_var]], color=color_manual), alpha=0.6)
+    } else if (show_points==FALSE){
+      base_plot_obj <- ggplot()
+    }
+    
+    #now add centile fans
+    base_plot_obj <- base_plot_obj +
+      geom_line(aes(x = long_centile_df[[x_var]], y = long_centile_df$values,
+                    group = long_centile_df$id.vars,
+                    linewidth = long_centile_df$id.vars,
+                    color=color_manual)) + 
+      scale_linewidth_manual(values = centile_linewidth, guide = "none") +
+      scale_color_identity()
+    
+  } else {
+    stop(paste0("Do you want to average over values of ", color_var, "?"))
+  }
+  
+  #label centile curves as needed
+  if (label_centiles == TRUE){
+    #find farthest point on x axis for each centile
+    x_var_s <- sym(x_var)
+    
+    if (!is.null(color_var)){
+      color_var_s <- sym(color_var)
+    } else {
+      color_var_s <- NULL
+    }
+    
+    data_end <- long_centile_df %>%
+      dplyr::group_by(!!color_var_s, id.vars) %>%
+      dplyr::filter(!!x_var_s == max(!!x_var_s, na.rm=TRUE)) %>%
+      ungroup() %>%
+      mutate(id.vars = as.numeric(gsub("cent_", "", id.vars))) #make centile labels prettier
+    
+    base_plot_obj <- base_plot_obj +
+      ggrepel::geom_text_repel(aes(x=data_end[[x_var_s]], y=data_end$values, label=scales::percent(data_end$id.vars)),
+                               nudge_x=(data_end[[x_var_s]]*.03), box.padding=0.15, size=3)
+  }
+  
+  #add peak points as needed
+  if (get_peaks == TRUE){
+    select_peak_dfs <- grep("^peak_", names(pred_list), value = TRUE)
+    peak_dfs <- pred_list[select_peak_dfs]
+    names(peak_dfs) <- sub("peak_", "", names(peak_dfs)) #drop prefix
+    
+    if (!is.null(color_var)){
+      merged_peak_df <- bind_rows(peak_dfs, .id = color_var)
+    } else {
+      merged_peak_df <- peak_dfs[[1]]
+    }
+    
+    base_plot_obj <- base_plot_obj +
+      geom_point(aes(x=merged_peak_df[[x_var]], y=merged_peak_df$y), size=3)
+    
+  }
+  
+  #format x-axis
+  x_axis <- match.arg(x_axis)
+  
+  if(x_axis != "custom") {
+    
+    #add days for fetal development?
+    if (grepl("fetal", x_axis, fixed=TRUE)){
+      add_val <- 280
+    } else {
+      add_val <- 0
+    }
+    
+    tickMarks <- c()
+    #log scaled?
+    if (grepl("log", x_axis, fixed=TRUE)){
+      for (year in c(0, 1, 2, 5, 10, 20, 50, 100)){
+        tickMarks <- append(tickMarks, log(year*365.25 + add_val, base=10))
+      }
+      tickLabels <- c("Birth", "1", "2", "5", "10", "20", "50", "100")
+      unit_lab <- "(log(years))"
+    } else {
+      for (year in seq(0, 100, by=10)){
+        tickMarks <- append(tickMarks, year*365.25 + add_val)
+      }
+      tickLabels <- c("Birth", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100")
+      unit_lab <- "(years)"
+    }
+    
+    final_plot_obj <- base_plot_obj +
+      scale_x_continuous(breaks=tickMarks, labels=tickLabels,
+                         limits=c(first(tickMarks), last(tickMarks))) +
+      labs(title=deparse(substitute(gamlssModel))) +
+      xlab(paste("Age at Scan", unit_lab)) +
+      ylab(deparse(substitute(pheno)))
+    
+  } else if (x_axis == "custom") {
+    final_plot_obj <- base_plot_obj +
+      labs(title=deparse(substitute(gamlssModel))) +
+      ylab(deparse(substitute(pheno)))
+  }
+  
+  return(final_plot_obj)
+  
+}
+
